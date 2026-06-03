@@ -1,0 +1,834 @@
+AI DEV FINAL THREE LAYER - DETAILED MAPPING AUDIT
+
+Date: 2026-06-27
+Scope checked: AIDevFinal old project vs AIDevFinalThreeLayer new project.
+Execution note: Per request, I did a source-level audit only. I did not run the services.
+
+
+1. HIGH LEVEL RESULT
+
+The new project is mapped to the old project at the architecture, graph-flow,
+node-name, route-boundary, and data-contract level.
+
+The new project is still not a byte-for-byte port of the old JS app, because it
+keeps the requested three-layer split and uses Python/FastAPI/LangGraph/Pydantic
+inside the orchestrator. After the latest pass, the main agent workflow now uses
+the old PM/architect/planner/coder/reviewer/debugger/registry/simplifier/pattern
+prompts and the Docker sandbox lifecycle has been ported into Python.
+
+Remaining differences are mostly around operational API/UI features:
+checkpoint resume, cancel, sandbox file browser APIs, and old dashboard-derived
+event compatibility.
+
+So the correct status is:
+
+- Same three-layer architecture: yes.
+- Same top-level graph flow: yes.
+- Same agent/node file names: yes.
+- Same state-field family: mostly yes, with Pydantic model changes.
+- Uniform JSON/SSE data sharing between layers: yes.
+- Same internal intelligence as old JS agents: mostly mapped for orchestrator
+  agent workflow; operational resume/cancel/file-browser parity still pending.
+- Same old server/dashboard capabilities: partial, not full.
+
+
+2. THREE LAYER ARCHITECTURE MAPPING
+
+Old project:
+
+- React dashboard lived in AIDevFinal/dashboard.
+- Node Express server lived in AIDevFinal/server.
+- LangGraph, agents, Gemini, Docker sandbox, graph runner, WebSocket bridge all
+  lived in the same Node.js application/process.
+
+New project:
+
+- frontend/
+  React + Vite dashboard.
+  Talks only to the gateway.
+  Uses JSON fetch calls and JSON SSE event payloads.
+
+- gateway/
+  Node.js + Express API gateway.
+  Owns login, user/project metadata, gateway health, SSE/WebSocket relay, and
+  JSON calls to the Python AI service.
+  It does not run the AI workflow itself.
+
+- orchestrator/
+  Python + FastAPI + LangGraph.
+  Owns graph execution, Pydantic state validation, Gemini access through
+  LangChain/LangGraph-compatible boundaries, Redis checkpoint writes, sandbox
+  file writes, and Git snapshots.
+
+- docker-compose.yml
+  Starts frontend, gateway, orchestrator, Postgres, and Redis as separate
+  services.
+
+This is a correct split for the requested 3-layer architecture.
+
+
+3. DATA SHARING STYLE
+
+Frontend -> Gateway:
+
+- POST /api/login with JSON.
+- GET /api/health with JSON response.
+- GET /api/projects?user_id=... with JSON response.
+- POST /api/projects with JSON:
+  {
+    "requirement": "...",
+    "user_id": "demo-user",
+    "token_budget_usd": 2.0
+  }
+- GET /api/projects/:projectId/events with SSE frames whose data is JSON.
+
+Gateway -> Orchestrator:
+
+- GET /health with JSON response.
+- POST /runs with JSON:
+  {
+    "requirement": "...",
+    "user_id": "...",
+    "token_budget_usd": 2.0
+  }
+- GET /runs/:projectId/events with SSE frames whose data is JSON.
+
+Streaming event shape:
+
+{
+  "type": "node.started | node.completed | run.completed | run.failed | heartbeat",
+  "node": "pmAgent | coderAgent | graph | ...",
+  "message": "...",
+  "state": { "...": "AgentState snapshot" }
+}
+
+Public API payloads use snake_case where appropriate:
+
+- user_id
+- project_id
+- token_budget_usd
+
+Internal agent state keeps JS-compatible field names:
+
+- projectId
+- userRequirement
+- pmStatus
+- clarifiedSpec
+- blueprint
+- taskQueue
+- fileRegistry
+- currentTask
+- tokenUsage
+- fileTree
+
+
+4. GRAPH FLOW MAPPING
+
+Old graph file:
+
+- AIDevFinal/src/config/graph.js
+
+New graph file:
+
+- AIDevFinalThreeLayer/orchestrator/app/graph/workflow.py
+
+The new graph has the same visible graph nodes and the same control-flow shape:
+
+START
+-> pmAgent
+-> humanInput OR architectStep1 OR END
+-> architectStep1
+-> architectStep2
+-> architectStep3
+-> architectStep4
+-> architectStep5
+-> blueprintValidator
+-> plannerAgent
+-> setupSandbox
+-> sandboxHealthCheck
+-> selectNextTask
+-> contextBuilder
+-> coderAgent
+-> updateRegistry
+-> reviewerAgent
+-> executorAgent
+-> snapshotManager
+-> selectNextTask
+-> debuggerAgent
+-> humanEscalation
+-> simplifyTask
+-> phaseVerification
+-> patternExtractor
+-> stateCompactor
+-> deploymentVerifier
+-> presentToUser
+-> END
+
+Router mapping:
+
+- pmAgent:
+  old: needs_clarification -> humanInput, spec_ready -> architectStep1.
+  new: same.
+
+- blueprintValidator:
+  old: valid or max cycles -> plannerAgent, else architectStep2/3/4.
+  new: same route targets.
+
+- sandboxHealthCheck:
+  old: always routes to selectNextTask in current version.
+  new: same.
+
+- selectNextTask:
+  old: contextBuilder, phaseVerification, or deploymentVerifier.
+  new: same route targets.
+
+- reviewerAgent:
+  old: approved -> executorAgent, reject under 3 cycles -> contextBuilder,
+  reject >= 3 -> simplifyTask.
+  new: same route targets.
+
+- executorAgent:
+  old: pass -> snapshotManager, fail -> debuggerAgent.
+  new: same.
+
+- debuggerAgent:
+  old: tier >= 3 -> humanEscalation, otherwise contextBuilder.
+  new: same.
+
+- humanEscalation:
+  old: skip -> selectNextTask, guidance -> contextBuilder, simplify -> simplifyTask.
+  new: same route targets. The input mechanism is different.
+
+- phaseVerification:
+  old: always -> patternExtractor.
+  new: same.
+
+- deploymentVerifier:
+  old: pass -> presentToUser, fail under 2 attempts -> debuggerAgent,
+  fail after 2 attempts -> presentToUser.
+  new: same after the audit fix.
+
+
+5. NODE FILE NAME MAPPING
+
+Every original agent/node file name now exists in Python:
+
+- architectAgent.js -> architectAgent.py
+- assembleEntryPoints.js -> assembleEntryPoints.py
+- blueprintValidator.js -> blueprintValidator.py
+- coderAgent.js -> coderAgent.py
+- contextBuilder.js -> contextBuilder.py
+- debuggerAgent.js -> debuggerAgent.py
+- deploymentVerifier.js -> deploymentVerifier.py
+- executorAgent.js -> executorAgent.py
+- humanEscalation.js -> humanEscalation.py
+- humanInput.js -> humanInput.py
+- patternExtractor.js -> patternExtractor.py
+- phaseVerification.js -> phaseVerification.py
+- plannerAgent.js -> plannerAgent.py
+- pmAgent.js -> pmAgent.py
+- presentToUser.js -> presentToUser.py
+- reviewerAgent.js -> reviewerAgent.py
+- sandboxHealthCheck.js -> sandboxHealthCheck.py
+- selectNextTask.js -> selectNextTask.py
+- setupSandbox.js -> setupSandbox.py
+- simplifyTask.js -> simplifyTask.py
+- snapshotManager.js -> snapshotManager.py
+- stateCompactor.js -> stateCompactor.py
+- updateRegistry.js -> updateRegistry.py
+
+Extra Python support files added:
+
+- _shared.py
+- agent_nodes.py
+- __init__.py
+
+agent_nodes.py is only a compatibility shim. It re-exports the new same-name
+node functions under older snake_case names.
+
+
+6. STATE MODEL MAPPING
+
+Old state:
+
+- AIDevFinal/src/config/state.js
+- LangGraph Annotation.Root.
+- Reducers merge arrays and objects, especially pmConversation, blueprint,
+  fileRegistry, projectPatterns, taskStatuses, userFeedback, and tokenUsage.
+
+New state:
+
+- AIDevFinalThreeLayer/orchestrator/app/models/contracts.py
+- Pydantic v2 BaseModel.
+- Explicit typed fields.
+- Nodes mutate the Pydantic model object directly and return the full state.
+
+Mapped fields:
+
+- userRequirement
+- pmStatus
+- pmQuestions
+- pmConversation
+- clarifiedSpec
+- blueprint
+- blueprintValidation
+- taskQueue
+- currentPhaseIndex
+- currentTaskIndex
+- fileRegistry
+- projectPatterns
+- sandboxId
+- sandboxHealthy
+- currentTask
+- taskStatuses
+- contextPackage
+- coderOutput
+- reviewResult
+- executionResult
+- debugState
+- userFeedback
+- feedbackIteration
+- maxFeedbackIterations
+- scopeDrift
+- userSatisfied
+- deploymentConfig
+- deploymentAttempts
+- tokenUsage
+- tokenBudget
+- currentPhase
+- error
+
+New fields added:
+
+- projectId
+- userId
+- fileTree
+- terminalOutput
+- gitSnapshots
+
+Important difference:
+
+- Old state reducers are not directly reproduced. Python uses explicit mutation
+  plus helper functions such as merge_file_registry.
+
+
+7. ORCHESTRATOR NODE-BY-NODE DETAIL
+
+pmAgent:
+
+- Old JS: full PM prompt with Gemini safeCallGemini, token budgeting, questions,
+  spec generation, and token delta handling.
+- New Python: uses the same PM prompt through safe_call_json_agent, LangChain,
+  Gemini, JSON repair/retry, and token/cost tracking. It returns mock JSON only
+  when GEMINI_API_KEY or Gemini deps are unavailable.
+- Mapping status: prompt and flow mapped.
+
+humanInput:
+
+- Old JS: CLI mode and server InputBridge mode, waits for user answers.
+- New Python: records dashboard/API handoff and sets spec_ready if there is a
+  userRequirement.
+- Mapping status: route exists, but live wait-for-dashboard-input is not fully
+  implemented in FastAPI/gateway.
+
+architectAgent:
+
+- Old JS: five Gemini prompt calls for entities, DB schema, APIs, frontend pages,
+  folder/dependencies.
+- New Python: same five prompt-backed calls, same naming rules, validation
+  feedback context, and same blueprint fields.
+- Mapping status: prompt and flow mapped.
+
+blueprintValidator:
+
+- Old JS: detailed validation of tables, entity-table matching, foreign keys,
+  endpoint/table consistency, frontend API calls, auth/page mismatch, and
+  warnings/errors with fix targets.
+- New Python: implements core checks for entity tables, foreign keys, endpoint
+  table references, frontend API calls, and auth mismatch.
+- Mapping status: close structurally, simpler internally.
+
+plannerAgent:
+
+- Old JS: Gemini generates detailed phased plan from blueprint and spec.
+- New Python: same Planner Agent prompt, scaffold-awareness rules, mandatory
+  phase order, and taskQueue shape.
+- Mapping status: prompt and flow mapped.
+
+setupSandbox:
+
+- Old JS: creates sandbox folders, scaffold files, .env files, Git repo, Docker
+  network, DB/backend/frontend containers, installs npm dependencies, creates DB
+  tables.
+- New Python: services/sandbox.py ports the same folder/scaffold/.env/Git/Docker
+  network/container/npm install/table creation behavior, then setupSandbox seeds
+  the scaffold registry.
+- Mapping status: core Docker sandbox behavior mapped.
+
+sandboxHealthCheck:
+
+- Old JS: checks sandbox record, folder structure, package files, Git, DB
+  container, backend container, frontend container.
+- New Python: checks the same categories through services/sandbox.py, with a
+  local-only fallback when Docker is unavailable.
+- Mapping status: mapped with fallback behavior.
+
+selectNextTask:
+
+- Old JS: selects next pending task, moves to phase verification after all phase
+  tasks are done, moves to done after all work.
+- New Python: same logic shape.
+- Mapping status: closely mapped.
+
+contextBuilder:
+
+- Old JS: builds rich context from registry, dependencies, related files,
+  relevant DB tables, API endpoints, templates, and estimated token size.
+- New Python: now ports exact/fuzzy/disk dependency lookup, convention-based
+  auto-includes, naming map, filtered DB/API context, and template file context.
+- Mapping status: behavior mapped.
+
+coderAgent:
+
+- Old JS: uses Gemini prompts for backend/frontend file generation, retry
+  context, existing file context, scaffold preservation, JSON file output.
+- New Python: same backend/frontend prompts, one file per LLM call, retry
+  context, existing file context, scaffold preservation, JSON output, exact path
+  enforcement, and sandbox writes.
+- Mapping status: behavior mapped.
+
+updateRegistry:
+
+- Old JS: uses Gemini to extract public interfaces from written JS/JSX files.
+- New Python: uses the same registry prompt through Gemini/LangChain and merges
+  public interfaces into fileRegistry.
+- Mapping status: behavior mapped.
+
+reviewerAgent:
+
+- Old JS: reads generated files and uses Gemini reviewer prompt with project
+  patterns, retry cycles, and structured issues.
+- New Python: uses the same reviewer prompt/checklist with project patterns and
+  review cycles.
+- Mapping status: behavior mapped.
+
+executorAgent:
+
+- Old JS: checks files, runs node --check in containers, validates imports and
+  exports, installs npm dependencies for backend/frontend tasks, returns detailed
+  errors.
+- New Python: ports file existence checks, Docker node --check syntax checks,
+  import resolution, named export validation, env convention checks, and npm
+  install checks.
+- Mapping status: behavior mapped.
+
+snapshotManager:
+
+- Old JS: Git snapshot with tags/rollback support through sandboxManager.
+- New Python: git add/commit/rev-parse short hash and stores gitSnapshots.
+- Mapping status: purpose mapped, simpler snapshot metadata.
+
+debuggerAgent:
+
+- Old JS: uses rollback tier, reads failing files, related files, Gemini debugger
+  prompt, writes fixes through coder path, promotes debug tier on low confidence.
+- New Python: uses the same debugger prompt, tiered context strategy, rollback
+  attempt, reviewResult feedback, and human escalation route.
+- Mapping status: behavior mapped.
+
+simplifyTask:
+
+- Old JS: Gemini breaks failed task into smaller subtasks.
+- New Python: uses the same simplify prompt and injects returned subtasks into
+  the current phase.
+- Mapping status: behavior mapped.
+
+humanEscalation:
+
+- Old JS: CLI/server InputBridge waits for skip/simplify/guidance.
+- New Python: waits through a FastAPI input bridge and accepts gateway-relayed
+  JSON answers for skip/simplify/guidance.
+- Mapping status: behavior mapped in the three-layer shape.
+
+phaseVerification:
+
+- Old JS: verifies phase files, fuzzy matches files, and calls
+  assembleBackendEntry/assembleFrontendEntry depending on phase name.
+- New Python before audit: only checked missing files.
+- New Python after audit fix: now also calls assembleBackendEntry and/or
+  assembleFrontendEntry for backend/frontend/deploy/assembly phases.
+- Mapping status: closer after fix, still no fuzzy match messages.
+
+patternExtractor:
+
+- Old JS: Gemini extracts specific coding patterns from generated files.
+- New Python: uses the old pattern extraction prompt through safe_call_json_agent.
+- Mapping status: behavior mapped through the LangGraph/LangChain boundary.
+
+stateCompactor:
+
+- Old JS: estimates state tokens and compacts completed task details.
+- New Python: compacts completed task details and trims terminalOutput.
+- Mapping status: same purpose, simpler token handling.
+
+deploymentVerifier:
+
+- Old JS: generates docker-compose and Dockerfiles, builds images, starts compose,
+  checks container status, probes backend/frontend/DB, reads logs, routes retry
+  or present.
+- New Python: generates the same Docker deployment files, builds, starts compose,
+  probes backend/frontend/DB, reads logs, tears down failed deployments, and routes
+  retry or present.
+- Mapping status: behavior mapped.
+
+presentToUser:
+
+- Old JS: summarizes files, sandbox path, task completion, token usage, and
+  final output.
+- New Python: marks currentPhase done and logs final dashboard state.
+- Mapping status: same terminal graph role, simplified output.
+
+assembleEntryPoints:
+
+- Old JS: helper functions assemble backend index route imports/mounts and
+  frontend App routes.
+- New Python: same helper names and similar deterministic assembly logic.
+- Audit fix: phaseVerification.py now actually calls these helpers, matching the
+  JS wiring.
+
+
+8. GATEWAY VS OLD SERVER MAPPING
+
+Old server files:
+
+- server/index.js
+- server/routes/projects.js
+- server/services/graphRunner.js
+- server/ws/handler.js
+
+New gateway files:
+
+- gateway/src/index.js
+- gateway/src/routes/projects.js
+- gateway/src/services/orchestratorClient.js
+- gateway/src/services/projectStore.js
+
+Mapped capabilities:
+
+- Express server: yes.
+- CORS and JSON body parsing: yes.
+- Health endpoint: yes, now also checks orchestrator.
+- Project create endpoint: yes.
+- Project list endpoint: yes.
+- Project metadata endpoint: yes.
+- Project metadata store: yes, added Postgres/in-memory store.
+- SSE event relay: yes.
+- WebSocket event relay: yes.
+- JSON relay to AI service: yes, now gateway calls FastAPI /runs.
+
+Different/additional in new gateway:
+
+- Added /api/login for lightweight user metadata.
+- Added PostgreSQL-backed users/projects metadata.
+- Added ORCHESTRATOR_URL based relay.
+- Added gateway health degradation response if orchestrator is unavailable.
+- Added SSE endpoint at /api/projects/:projectId/events.
+- Added WebSocket endpoint at /ws/projects/:projectId/events.
+- Uses project_id/user_id/token_budget_usd public API fields.
+
+Old server capabilities not fully mapped yet:
+
+- POST /api/projects/:id/resume is not implemented in new gateway.
+- POST /api/projects/:id/cancel is not implemented in new gateway.
+- GET /api/projects/:id/sandbox is not implemented in new gateway.
+- GET /api/projects/:id/files/* is not implemented in new gateway.
+- Old WebSocket accepted client messages:
+  human_response, cancel, ping.
+  New WebSocket is currently stream relay only.
+- Old graphRunner streamed derived events such as spec_ready, blueprint_update,
+  taskqueue_ready, sandbox_created, task_started, code_written, token_update.
+  New orchestrator emits generic node.started/node.completed/run.completed events
+  with full state snapshots instead.
+
+
+9. FRONTEND VS OLD DASHBOARD MAPPING
+
+Old dashboard:
+
+- React 18 + Zustand store.
+- useWebSocket hook connects to ws://localhost:3000/ws?projectId=...
+- REST API client supports create, list, get, resume, cancel, sandbox info, file
+  read, health.
+- UI has PipelineVisualizer, LogStream, OutputPanel, HumanInputPanel,
+  TokenBudgetBar.
+
+New frontend:
+
+- React 19 + Vite + lucide-react.
+- Single main dashboard in frontend/src/main.jsx.
+- Calls only gateway endpoints.
+- Uses EventSource for SSE from /api/projects/:projectId/events.
+- Shows project list, health, pipeline node progress, file tree, terminal stream,
+  token/cost panel.
+
+Mapped capabilities:
+
+- Requirement input: yes.
+- Launch project: yes.
+- Pipeline node visualization: yes, simplified.
+- Terminal/log stream: yes, from JSON SSE events.
+- File tree: yes, from state.fileTree in event state.
+- Token/cost UI: yes, from state.tokenUsage.
+- Gateway-only boundary: yes.
+- HumanInputPanel equivalent: yes, via input.requested SSE events and
+  /api/projects/:projectId/input JSON replies.
+
+Old dashboard capabilities not fully mapped yet:
+
+- WebSocket client sendMessage for human_response/cancel is not implemented.
+- Resume button is not implemented.
+- Cancel/abort button is not implemented.
+- Sandbox file read/output panel is not implemented.
+- Zustand store was replaced by local React state.
+
+
+10. DOCKER AND INFRA MAPPING
+
+Old project:
+
+- No top-level docker-compose for the whole application was found.
+- package.json runs Node CLI/server/dashboard.
+- sandboxManager.js creates per-project Docker network and DB/backend/frontend
+  containers from inside the graph flow.
+
+New project:
+
+- Top-level docker-compose.yml added.
+- Services:
+  - frontend
+  - gateway
+  - orchestrator
+  - postgres
+  - redis
+- frontend/Dockerfile uses node:22-alpine and runs npm run dev.
+- gateway/Dockerfile uses node:22-alpine and runs npm start.
+- orchestrator/Dockerfile uses python:3.12-slim, installs git and docker.io,
+  installs requirements, starts uvicorn.
+- orchestrator mounts:
+  - ./sandbox:/workspace/sandboxes
+  - /var/run/docker.sock:/var/run/docker.sock
+- .env.example added for Gemini, ports, database, Redis, sandbox root, and token
+  budget.
+- infra/schema.sql added.
+
+Audit fix:
+
+- infra/schema.sql was updated to include display_name, updated_at,
+  last_event_type, last_event_node, last_message, and updated_at columns so it
+  matches gateway/src/services/projectStore.js.
+
+Latest sandbox parity update:
+
+- orchestrator/app/services/sandbox.py now starts the per-project Docker network
+  and DB/backend/frontend containers from inside the graph flow, writes the same
+  deterministic scaffold files, installs npm dependencies, creates PostgreSQL
+  tables from the blueprint schema, runs health checks, executes commands in the
+  correct container, and supports Git tags plus rollback.
+- It keeps a local-only fallback when Docker is unavailable so source generation
+  can still proceed during development.
+
+
+11. GEMINI / LANGGRAPH / PYDANTIC MAPPING
+
+Old JS:
+
+- @langchain/langgraph StateGraph.
+- @google/genai direct Gemini SDK wrapper.
+- safeCallGemini handles JSON parse repair, retries, token accounting, and token
+  budget checks.
+
+New Python:
+
+- langgraph StateGraph in workflow.py.
+- Pydantic v2 contracts in contracts.py.
+- safe_call_json_agent/call_json_agent use LangChain prompt ->
+  ChatGoogleGenerativeAI -> JSON extraction/repair.
+- No direct google.generativeai or callGemini usage remains.
+- Redis checkpoint service writes full Pydantic state after every node.
+
+Latest Gemini parity update:
+
+- PM, architect, planner, coder, registry, reviewer, debugger, simplify, and
+  pattern extraction nodes now call the Gemini/LangChain boundary.
+- The wrapper now includes JSON-only prompting, parse extraction, truncation
+  repair, retries, token-budget checks, and token/cost deltas.
+
+
+12. REDIS / CHECKPOINTING MAPPING
+
+Old JS:
+
+- createCheckpointer returns RedisSaver if available, otherwise MemorySaver.
+- LangGraph checkpointer is integrated into graph.compile.
+- CLI resume uses graph.getState and graph.invoke(null, config).
+
+New Python:
+
+- workflow.py runs StateGraph and calls checkpoint_state after each node.
+- checkpoint_state writes:
+  checkpoint:{project_id}:{node_name}
+  and appends keys to:
+  checkpoints:{project_id}
+- Event bus keeps in-memory event streams for SSE.
+
+Important difference:
+
+- New Redis checkpointing is custom per-node state persistence, not LangGraph's
+  native RedisSaver checkpointer.
+- Resume from checkpoint is not implemented yet in FastAPI/gateway.
+
+
+13. FILES ADDED OR CHANGED BY THE THREE-LAYER VERSION
+
+Added frontend layer:
+
+- frontend/index.html
+- frontend/package.json
+- frontend/Dockerfile
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Added gateway layer:
+
+- gateway/package.json
+- gateway/Dockerfile
+- gateway/src/index.js
+- gateway/src/routes/projects.js
+- gateway/src/services/orchestratorClient.js
+- gateway/src/services/projectStore.js
+
+Added orchestrator layer:
+
+- orchestrator/Dockerfile
+- orchestrator/requirements.txt
+- orchestrator/app/main.py
+- orchestrator/app/graph/workflow.py
+- orchestrator/app/models/contracts.py
+- orchestrator/app/services/event_bus.py
+- orchestrator/app/services/gemini_client.py
+- orchestrator/app/services/redis_checkpoint.py
+- orchestrator/app/services/sandbox.py
+- all Python same-name node files under orchestrator/app/nodes.
+
+Added infra/docs:
+
+- docker-compose.yml
+- .env.example
+- .gitignore
+- infra/schema.sql
+- sandbox/.gitkeep
+- README.md
+- additional.txt
+
+Audit-time fixes added:
+
+- phaseVerification.py now imports and calls assembleBackendEntry and
+  assembleFrontendEntry, matching old JS phaseVerification.js.
+- deploymentVerifierRouter was already adjusted earlier to match old JS retry
+  fallback after 2 deployment attempts.
+- humanEscalationRouter was already adjusted earlier to match old JS skip,
+  guidance, and simplify routes.
+- infra/schema.sql now matches gateway projectStore columns.
+- pmAgent.py now uses the old JS PM prompt through the LangGraph/LangChain
+  Gemini boundary instead of a simplified prompt.
+- architectAgent.py now uses the old five architect prompts for entity naming,
+  DB schema, API endpoints, frontend pages, and dependencies/folder structure.
+- plannerAgent.py now uses the old Planner Agent prompt and scaffold-awareness
+  rules instead of generating a deterministic queue.
+- contextBuilder.py now matches the old smart context builder behavior:
+  exact/fuzzy/disk dependency lookup, convention-based auto-includes, naming
+  map, filtered DB schema, filtered API endpoints, and template file context.
+- coderAgent.py now uses the old one-file-per-call Gemini coding prompts,
+  scaffold file protection, retry context, exact path enforcement, and writes
+  model output to the Docker sandbox.
+- updateRegistry.py now uses the old registry extraction prompt instead of only
+  regex extraction.
+- reviewerAgent.py now uses the old review prompt and checklist for imports,
+  exports, async/await, response formats, auth, env vars, security, and
+  completeness.
+- executorAgent.py now performs the old static checks: file existence, Docker
+  node --check syntax validation, import resolution, named export validation,
+  frontend/backend env convention checks, and npm install checks.
+- debuggerAgent.py now uses the old debugger prompt and tiered escalation:
+  failing-file context, broader context, Git rollback, then human escalation.
+- simplifyTask.py and patternExtractor.py now use the old prompts through
+  Gemini/LangChain instead of deterministic placeholders.
+- services/gemini_client.py now mirrors the old safeCallGemini behavior:
+  JSON-only requests, retries, JSON extraction/repair, token-budget checks, and
+  token/cost deltas, while still being invoked from LangGraph nodes.
+- services/sandbox.py now ports the old Docker sandbox lifecycle: scaffold
+  folders/files, DB/backend/frontend containers, Docker network, npm installs,
+  DB table creation, health checks, command execution in the right container,
+  Git snapshots/tags, rollback, and destroy.
+- services/input_bridge.py plus FastAPI/gateway input routes now port the old
+  InputBridge behavior into the three-layer JSON/SSE architecture.
+- frontend/src/main.jsx now shows PM clarification / escalation input controls
+  when input.requested arrives and posts JSON answers through the gateway.
+- deploymentVerifier.py now ports the old Docker compose deployment generation,
+  build/start/probe/log/retry workflow instead of checking only file presence.
+- blueprintValidator.py now includes orphan-table warnings and warning-driven
+  reroutes/max-cycle behavior from the old JS validator.
+
+
+14. REMAINING GAPS IF YOU WANT A TRUE FULL PORT
+
+To make the new project not just structurally mapped but behaviorally equivalent
+to the old JavaScript project, these are the main remaining tasks:
+
+1. Implement FastAPI/gateway resume:
+   old POST /api/projects/:id/resume equivalent.
+
+2. Implement cancel:
+   old POST /api/projects/:id/cancel and WebSocket cancel equivalent.
+
+3. Implement sandbox metadata/file APIs:
+   old GET /api/projects/:id/sandbox and GET /api/projects/:id/files/*.
+
+4. Add frontend resume/cancel controls.
+
+5. Add derived event shapes if you want old dashboard compatibility:
+    spec_ready, blueprint_update, validation_result, taskqueue_ready,
+    sandbox_created, task_started, code_written, review_result,
+    execution_result, token_update, phase_change.
+
+6. Reconnect sandbox after process restart:
+   services/sandbox.py ports the Docker lifecycle and stores live sandbox
+   metadata in memory like the old process did, but the FastAPI resume endpoint
+   still needs to call a reconnect flow when restarting old projects.
+
+
+15. FINAL AUDIT SUMMARY
+
+The new folder correctly follows the requested three-layer architecture:
+
+Frontend -> Gateway -> Orchestrator
+
+The data passing between layers is uniform:
+
+JSON for HTTP, JSON payloads inside SSE/WebSocket events for streaming.
+
+The graph and file naming are mapped to the old project:
+
+Same node names, same main graph route targets, same major state fields.
+
+Implementation depth after the latest pass:
+
+The orchestrator now maps the old rich Node/Gemini/Docker runtime for the main
+agent workflow: PM, architect, planner, context building, coding, registry,
+review, execution, debugging, simplification, pattern extraction, Docker
+sandboxing, Git snapshots, and rollback are now prompt-backed or behaviorally
+ported into Python/LangGraph/Pydantic.
+
+The remaining differences are mostly around gateway/frontend operational
+features: resume, cancel, sandbox file APIs, derived event compatibility, and
+reconnecting sandbox metadata across orchestrator restarts.
