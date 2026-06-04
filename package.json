@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "scripts": {
+    "test:orchestrator": "docker compose exec -T orchestrator sh -lc \"PYTHONPATH=/app python -m unittest discover -s /tests/orchestrator -p 'test_*.py'\"",
+    "test:orchestrator:local": "PYTHONPATH=. python3 -m unittest discover -s tests/orchestrator -p 'test_*.py'",
+    "test:gateway": "node tests/gateway/test-project-zip.js",
+    "test:all:mock": "npm run test:orchestrator && npm run test:gateway"
+  },
+  "dependencies": {
+    "langchain": "^1.5.2"
+  }
+}
