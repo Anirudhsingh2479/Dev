@@ -1,0 +1,79 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      VITE_GATEWAY_URL: http://localhost:${GATEWAY_PORT:-3000}
+    depends_on:
+      - gateway
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "${GATEWAY_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-5173}
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      DATABASE_URL: ${DATABASE_URL:-postgresql://aidev:aidev@postgres:5432/aidev}
+      MONGO_URI: ${MONGO_URI:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-in-production}
+      REDIS_URL: redis://redis:6379/0
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SECURE: ${MAIL_SECURE:-false}
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASS: ${MAIL_PASS:-}
+      SANDBOX_ROOT: /workspace/sandboxes
+    volumes:
+      - ./sandbox:/workspace/sandboxes:ro
+    depends_on:
+      - orchestrator
+      - postgres
+      - redis
+
+  orchestrator:
+    build: ./orchestrator
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_INPUT_COST_PER_1M: ${GEMINI_INPUT_COST_PER_1M:-0.30}
+      GEMINI_OUTPUT_COST_PER_1M: ${GEMINI_OUTPUT_COST_PER_1M:-2.50}
+      REDIS_URL: redis://redis:6379/0
+      SANDBOX_ROOT: /workspace/sandboxes
+      HOST_SANDBOX_ROOT: ${HOST_SANDBOX_ROOT:-${PWD}/sandbox}
+      PROJECT_DB_URI: ${PROJECT_DB_URI:-}
+      TOKEN_BUDGET_USD: ${TOKEN_BUDGET_USD:-2.0}
+      REQUIRE_DOCKER: "true"
+      DOCKER_RUN_TIMEOUT_MS: ${DOCKER_RUN_TIMEOUT_MS:-300000}
+      NPM_INSTALL_TIMEOUT_MS: ${NPM_INSTALL_TIMEOUT_MS:-300000}
+      SANDBOX_FRONTEND_HOST_PORT: ${SANDBOX_FRONTEND_HOST_PORT:-15173}
+      SANDBOX_BACKEND_HOST_PORT: ${SANDBOX_BACKEND_HOST_PORT:-15000}
+    volumes:
+      - ./sandbox:/workspace/sandboxes
+      - ./tests:/tests:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aidev
+      POSTGRES_PASSWORD: aidev
+      POSTGRES_DB: aidev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:
